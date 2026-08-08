@@ -341,6 +341,19 @@ async function main() {
       }
     }
 
+    // 送進 Supabase 前先去重：同一批裡如果有兩筆自然鍵完全一樣的資料，
+    // Postgres 的 upsert 沒辦法在同一個指令裡對同一列更新兩次，會整批失敗
+    const dedupMap = new Map();
+    for (const row of sourceRows) {
+      const key = `${row.source}|||${row.chart_key}|||${row.captured_at}|||${row.artist_name}|||${row.track_name}`;
+      dedupMap.set(key, row); // 後面的覆蓋前面的，保留最後一筆
+    }
+    const dedupedRows = [...dedupMap.values()];
+    if (dedupedRows.length < sourceRows.length) {
+      console.log(`[${src.source}] 批次內去重：${sourceRows.length} -> ${dedupedRows.length} 筆`);
+    }
+    sourceRows = dedupedRows;
+
     // Supabase 一次寫入筆數太多容易超時，切成小批
     const BATCH = 500;
     for (let i = 0; i < sourceRows.length; i += BATCH) {
