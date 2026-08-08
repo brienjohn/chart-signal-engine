@@ -1,0 +1,20 @@
+name: Ingest Chart Snapshots
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 每天 UTC 06:00 = 台北 14:00，讓當天各來源大部分都已經跑過
+  workflow_dispatch: {}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+      - run: node ingest_snapshots.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

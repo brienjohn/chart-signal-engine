@@ -1,0 +1,13 @@
+{
+  "name": "chart-signal-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "ingest": "node ingest_snapshots.js",
+    "crosswalk": "node build_crosswalk.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
