@@ -1,12 +1,12 @@
-name: Ingest Chart Snapshots
+name: Compute Weekly Signals
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 每天 UTC 06:00 = 台北 14:00
+    - cron: "0 6 * * 5"   # 每週五 UTC 06:00 = 台北週五 14:00
   workflow_dispatch: {}
 
 jobs:
-  ingest:
+  compute:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,8 +14,7 @@ jobs:
         with:
           node-version: "20"
       - run: npm install
-      - run: node ingest_snapshots.js
+      - run: node compute_signals.js
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
