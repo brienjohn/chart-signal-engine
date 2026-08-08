@@ -42,7 +42,7 @@ const SOURCES = [
       chart_key: `spotify_weekly_artists_${r.market}`,
       rank: parseInt(r.rank, 10) || null,
       artist_name: r.artist_name || "",
-      track_name: null,
+      track_name: "",
       captured_at: toEpoch(r.captured_week_end),
       metrics: { market: r.market, rank_change: r.rank_change, spotify_artist_id: r.artist_spotify_id },
     }),
@@ -283,14 +283,14 @@ function parseCsv(text) {
 
 async function insertSnapshots(rows) {
   if (!rows.length) return;
-  const url = `${SUPABASE_URL}/rest/v1/chart_snapshots`;
+  const url = `${SUPABASE_URL}/rest/v1/chart_snapshots?on_conflict=source,chart_key,captured_at,artist_name,track_name`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       apikey: SUPABASE_SERVICE_ROLE_KEY,
       Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
       "Content-Type": "application/json",
-      Prefer: "return=minimal",
+      Prefer: "resolution=merge-duplicates,return=minimal",
     },
     body: JSON.stringify(rows),
   });
