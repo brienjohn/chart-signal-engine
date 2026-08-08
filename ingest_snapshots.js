@@ -165,7 +165,7 @@ const SOURCES = [
       artist_name: r.secondary_name || "",
       track_name: r.primary_name || "",
       captured_at: toEpoch(r.captured_date),
-      metrics: { market: r.market, release_date: r.release_date, metric_value: r.metric_value, raw_text: r.raw_text },
+      metrics: { market: r.market, release_date: r.release_date, metric_value: r.metric_value, raw_text: r.raw_text, image_url: r.image_url || "" },
     }),
   },
 ];
