@@ -4,8 +4,15 @@ import "dotenv/config";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 const GITHUB_OWNER = "brienjohn";
+
+function githubHeaders() {
+  const headers = { Accept: "application/vnd.github+json" };
+  if (GITHUB_TOKEN) headers.Authorization = `token ${GITHUB_TOKEN}`;
+  return headers;
+}
 
 // ---- 各來源設定：repo 名稱、要抓哪個檔名前綴、怎麼把一列資料轉成統一格式 ----
 
@@ -164,14 +171,14 @@ const SOURCES = [
 
 async function listRecentCommits(repo, pathPrefix, perPage = 15) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/commits?path=${encodeURIComponent(pathPrefix)}&per_page=${perPage}`;
-  const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
+  const res = await fetch(url, { headers: githubHeaders() });
   if (!res.ok) throw new Error(`列出 ${repo} 最近 commit 失敗：HTTP ${res.status}`);
   return res.json();
 }
 
 async function getCommitFiles(repo, sha) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/commits/${sha}`;
-  const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
+  const res = await fetch(url, { headers: githubHeaders() });
   if (!res.ok) throw new Error(`讀取 commit ${sha} 失敗：HTTP ${res.status}`);
   const data = await res.json();
   return (data.files || [])
