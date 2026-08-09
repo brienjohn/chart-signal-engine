@@ -404,7 +404,9 @@ async function main() {
   const tier3Pool = [];
   for (const [, gb] of groupBest) {
     if (gb.info.tier !== 3) continue;
-    if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.score });
+    // 劇烈變動改用「相對這個來源自己門檻的倍數」，不是原始跳動幅度，
+    // 不然波動天生就小的來源（例如 Cashbox）永遠比不過波動大的來源
+    if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.jump / jumpFloorFor(gb.jump.chartKey) });
     if (gb.newEntry) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: gb.newEntry.pct * 3 });
     if (gb.momentum) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: gb.momentum.pct * 3 });
   }
