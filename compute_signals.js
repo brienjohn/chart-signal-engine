@@ -74,6 +74,16 @@ function jumpFloorFor(chartKey) {
 function positionWeight(finalRank, chartSize) {
   return 1 + (1 - (finalRank - 1) / chartSize);
 }
+// 新進榜／動能延續原本用「佔榜單百分比」計分，最高封頂在固定值，
+// 一旦好幾個候選同時衝到頂，會全部黏在天花板上，讓後面的離群值比較失去意義。
+// 改成沒有上限的算法：新進榜用「榜單總長度 ÷ 名次」（大榜衝進前面分數更高，
+// 不會跟小榜衝第一名拿一樣的分數）；動能延續用實際爬升的名次數（不除以榜單大小封頂）
+function newEntryScore(cand) {
+  return cand.chartSize / cand.cur.rank;
+}
+function momentumScore(cand) {
+  return cand.climbed;
+}
 
 const ASIA_POOL_MARKETS = ["vn", "th", "id", "in", "sg", "my", "jp", "kr"];
 const MARKET_LABELS = { global: "全球", tw: "台灣", jp: "日本", kr: "韓國", vn: "越南", th: "泰國", id: "印尼", in: "印度", sg: "新加坡", my: "馬來西亞" };
@@ -274,7 +284,7 @@ function bestCandidatesForChart(chartKey, periodsMap) {
               const latestRow = weekEndRows.find((r) => trackKey(r) === key);
               if (latestRow) {
                 bestPct = pct;
-                best = { cur: latestRow, ranks: ranks.slice(streakStart, i), pct, chartSize, chartKey };
+                best = { cur: latestRow, ranks: ranks.slice(streakStart, i), pct, climbed, chartSize, chartKey };
               }
             }
           }
@@ -372,8 +382,8 @@ async function main() {
     if (gb.info.tier !== 1) continue;
     const candidates = [];
     if (gb.jump) candidates.push({ type: "劇烈變動", cand: gb.jump, score: gb.jump.score });
-    if (gb.newEntry) candidates.push({ type: "新進榜", cand: gb.newEntry, score: gb.newEntry.pct * 3 });
-    if (gb.momentum) candidates.push({ type: "動能延續", cand: gb.momentum, score: gb.momentum.pct * 3 });
+    if (gb.newEntry) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.momentum) candidates.push({ type: "動能延續", cand: gb.momentum, score: momentumScore(gb.momentum) });
     candidates.sort((a, b) => b.score - a.score);
     for (const c of candidates.slice(0, TIER1_MAX_PER_GROUP)) {
       finalSignals.push(buildSignalRow(c.type, gb.info, c.cand, today));
@@ -393,8 +403,8 @@ async function main() {
   for (const [, gb] of groupBest) {
     if (gb.info.tier !== 2) continue;
     if (gb.jump && passesMajorActGate(gb.jump)) tier2Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.score });
-    if (gb.newEntry) tier2Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: gb.newEntry.pct * 3 });
-    if (gb.momentum) tier2Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: gb.momentum.pct * 3 });
+    if (gb.newEntry) tier2Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.momentum) tier2Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
   }
   tier2Pool.sort((a, b) => b.score - a.score);
   for (const c of tier2Pool.slice(0, TIER2_POOL_SIZE)) {
@@ -407,8 +417,8 @@ async function main() {
     // 劇烈變動改用「相對這個來源自己門檻的倍數」，不是原始跳動幅度，
     // 不然波動天生就小的來源（例如 Cashbox）永遠比不過波動大的來源
     if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.jump / jumpFloorFor(gb.jump.chartKey) });
-    if (gb.newEntry) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: gb.newEntry.pct * 3 });
-    if (gb.momentum) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: gb.momentum.pct * 3 });
+    if (gb.newEntry) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.momentum) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
   }
   console.log(`Tier 3 候選池：${tier3Pool.length} 個（要 >= 10 才會開始比較離群值）`);
   if (tier3Pool.length >= 10) {
