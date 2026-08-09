@@ -25,6 +25,65 @@ function toEpoch(v) {
 // 直接列整個資料夾就好，不會遇到大型 repo（像 StreetVoice 即時榜）目錄列表被截斷的問題
 const HISTORICAL_SOURCES = [
   {
+    source: "cashbox",
+    repo: "cashbox-ktv-weekly",
+    prefix: "cashbox_ktv_weekly_top30_",
+    perFile: true,
+    // rank 欄位存的是升降符號不是名次，真正名次要用「同一個榜裡排第幾行」來算，
+    // 國語／台語兩個榜混在同一個檔案裡，計數要分開
+    parseRow: (records) => {
+      const counters = {};
+      return records.map((r) => {
+        const key = r.chart || "unknown";
+        counters[key] = (counters[key] || 0) + 1;
+        return {
+          chart_key: `cashbox_${r.chart}`,
+          rank: counters[key],
+          artist_name: r.artist || "",
+          track_name: r.title || "",
+          captured_at: toEpoch(r.captured_at),
+          metrics: {
+            rank_change_symbol: r.rank,
+            last_week_rank: r.last_week_rank,
+            is_new_entry: r.is_new_entry,
+            weeks_on_chart: r.weeks_on_chart,
+          },
+        };
+      });
+    },
+  },
+  {
+    source: "iradio",
+    repo: "iradio-scraper",
+    prefix: "iradio_",
+    perFile: true,
+    // 原始資料是播出紀錄，沒有名次，用「當天播放次數」自己算出一個排名
+    // （播越多次代表當天越熱門），今天播放的檔案（iradio_today.csv）先跳過，
+    // 只吃有明確日期、已經播完一整天的檔案
+    excludeExact: "iradio_today.csv",
+    parseRow: (records) => {
+      const counts = new Map(); // key -> { count, artist, song, date }
+      for (const r of records) {
+        const artist = (r["演唱(奏)者"] || "").trim();
+        const song = (r["歌曲名稱"] || "").trim();
+        const date = r["日期"];
+        if (!song && !artist) continue;
+        const key = `${artist}|||${song}`;
+        if (!counts.has(key)) counts.set(key, { count: 0, artist, song, date });
+        counts.get(key).count += 1;
+      }
+      const ranked = [...counts.values()].sort((a, b) => b.count - a.count);
+      return ranked.map((item, idx) => ({
+        chart_key: "iradio_playlist",
+        rank: idx + 1,
+        artist_name: item.artist,
+        track_name: item.song,
+        captured_at: toEpoch(item.date),
+        metrics: { play_count_that_day: item.count },
+      }));
+    },
+  },
+  {
     source: "streetvoice_weekly",
     repo: "streetvoice-realtime-scraper",
     prefix: "streetvoice_weekly_",
@@ -218,7 +277,9 @@ async function main() {
       console.warn(`[warn] 列出檔案失敗：${e.message}`);
       continue;
     }
-    const matched = allFiles.filter((f) => f.name.startsWith(src.prefix));
+    const matched = allFiles
+      .filter((f) => f.name.startsWith(src.prefix))
+      .filter((f) => !src.excludeExact || f.name !== src.excludeExact);
     console.log(`找到 ${matched.length} 個檔案`);
 
     let sourceRows = [];
@@ -228,9 +289,15 @@ async function main() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
         const records = parseCsv(text);
-        for (const r of records) {
-          const mapped = src.parseRow(r);
-          sourceRows.push({ source: src.source, ...mapped });
+        if (src.perFile) {
+          // 這個來源要看完整個檔案才能算（例如要先數完當天播幾次才知道排名）
+          const mappedRows = src.parseRow(records);
+          for (const mapped of mappedRows) sourceRows.push({ source: src.source, ...mapped });
+        } else {
+          for (const r of records) {
+            const mapped = src.parseRow(r);
+            sourceRows.push({ source: src.source, ...mapped });
+          }
         }
       } catch (e) {
         console.warn(`[warn] 讀取 ${f.name} 失敗：${e.message}`);
