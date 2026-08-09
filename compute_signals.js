@@ -352,6 +352,7 @@ async function main() {
 
   const perChartBest = new Map();
   for (const [chartKey, periodsMap] of byChart) {
+    if (chartKey.startsWith("iradio")) continue; // iRadio 另外用「本週播放次數排行」處理，不進入這套比較邏輯
     const best = bestCandidatesForChart(chartKey, periodsMap);
     if (Object.keys(best).length) perChartBest.set(chartKey, best);
   }
@@ -444,9 +445,44 @@ async function main() {
     }
   }
 
+  // ---- iRadio 獨立處理：不跟其他來源比較異常，單純算「本週播放次數」加總取前幾名 ----
+  const IRADIO_TOP_N = 5;
+  {
+    const iradioPeriods = byChart.get("iradio_playlist");
+    if (iradioPeriods) {
+      const now = Date.now();
+      const totals = new Map(); // trackKey -> { artist, track, count, image }
+      for (const [t, rows] of iradioPeriods) {
+        if (now - new Date(t).getTime() > WEEK_MS) continue;
+        for (const r of rows) {
+          const key = trackKey(r);
+          const plays = parseInt(r.metrics?.play_count_that_day, 10) || 0;
+          if (!totals.has(key)) totals.set(key, { artist: r.artist_name, track: r.track_name, count: 0 });
+          totals.get(key).count += plays;
+        }
+      }
+      const ranked = [...totals.values()].sort((a, b) => b.count - a.count).slice(0, IRADIO_TOP_N);
+      ranked.forEach((item, i) => {
+        const name = [item.track, item.artist].filter(Boolean).join(" — ") || item.artist || item.track;
+        finalSignals.push({
+          日期: today,
+          signal_type: "本週播放排行",
+          title: `〈${name}〉本週播放第 ${i + 1} 名`,
+          description: `本週累計播放 ${item.count} 次`,
+          artist_name: item.artist,
+          track_name: item.track,
+          sources: ["iradio_playlist"],
+          metrics: { group_id: "iradio", group_label: "iRadio 中廣", tier: 0, chart_key: "iradio_playlist", rank: i + 1, weekly_plays: item.count },
+          image_url: null,
+        });
+      });
+    }
+  }
+
   console.log(`Tier 1: ${finalSignals.filter((s) => s.metrics.tier === 1).length} 則`);
   console.log(`Tier 2: ${finalSignals.filter((s) => s.metrics.tier === 2).length} 則`);
   console.log(`Tier 3: ${finalSignals.filter((s) => s.metrics.tier === 3).length} 則`);
+  console.log(`iRadio 本週播放排行: ${finalSignals.filter((s) => s.metrics.tier === 0).length} 則`);
   console.log(`本次總計 ${finalSignals.length} 則訊號`);
 
   const BATCH = 300;
