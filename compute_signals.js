@@ -410,6 +410,7 @@ async function main() {
     if (gb.newEntry) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: gb.newEntry.pct * 3 });
     if (gb.momentum) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: gb.momentum.pct * 3 });
   }
+  console.log(`Tier 3 候選池：${tier3Pool.length} 個（要 >= 10 才會開始比較離群值）`);
   if (tier3Pool.length >= 10) {
     const scores = tier3Pool.map((c) => c.score);
     const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
