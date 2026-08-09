@@ -182,6 +182,9 @@ function getGroupInfo(chartKey) {
   if (chartKey.startsWith("cashbox_")) {
     return { groupId: chartKey, tier: 3, label: chartKey.replace("cashbox_", "錢櫃 ") };
   }
+  if (chartKey.startsWith("iradio")) {
+    return { groupId: "iradio", tier: 3, label: "iRadio 中廣" };
+  }
   if (chartKey.startsWith("youtube_")) {
     return { groupId: "youtube_global", tier: 3, label: "YouTube 全球" };
   }
