@@ -1,0 +1,250 @@
+// 訊號引擎 - 歷史資料補匯入
+// 跟 ingest_snapshots.js 不一樣：那支只看「最新一次 commit」，這支會把整個 data/
+// 資料夾裡「所有」符合條件的歷史檔案都掃過去匯入，用來吃掉之前已經爬到、
+// 但資料庫還沒真正收進去的回溯資料。可以重複執行，已經進去的不會重複寫入。
+import "dotenv/config";
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+
+const GITHUB_OWNER = "brienjohn";
+
+function githubHeaders() {
+  const headers = { Accept: "application/vnd.github+json" };
+  if (GITHUB_TOKEN) headers.Authorization = `token ${GITHUB_TOKEN}`;
+  return headers;
+}
+
+function toEpoch(v) {
+  const t = Date.parse(v);
+  return isNaN(t) ? null : new Date(t).toISOString();
+}
+
+// 這三個來源已經確認有回溯資料堆在 GitHub 上、檔案數量也不大（幾十個以內），
+// 直接列整個資料夾就好，不會遇到大型 repo（像 StreetVoice 即時榜）目錄列表被截斷的問題
+const HISTORICAL_SOURCES = [
+  {
+    source: "streetvoice_weekly",
+    repo: "streetvoice-realtime-scraper",
+    prefix: "streetvoice_weekly_",
+    parseRow: (r) => ({
+      chart_key: `streetvoice_${r.chart_timeframe}_${r.chart_genre}`,
+      rank: parseInt(r.rank, 10) || null,
+      artist_name: r.artist_name || "",
+      track_name: r.song_title || "",
+      captured_at: toEpoch(r.snapshot_time),
+      metrics: {
+        play_count: r.play_count,
+        likes_count: r.likes_count,
+        honors: r.honors,
+        artist_url: r.artist_url,
+        song_url: r.song_url,
+        image_url: r.cover_image_url || "",
+      },
+    }),
+  },
+  {
+    source: "kkbox_kma",
+    repo: "kkbox-charts-scraper",
+    prefix: "kkbox_kma_",
+    parseRow: (r) => ({
+      chart_key: `kkbox_kma_${r.genre}_${r.chart_type}_${r.timeframe}`,
+      rank: parseInt(r.rank_this_period, 10) || null,
+      artist_name: r.artist_name || "",
+      track_name: r.song_name || r.album_name || "",
+      captured_at: toEpoch(r.captured_date),
+      metrics: {
+        genre: r.genre,
+        chart_type: r.chart_type,
+        timeframe: r.timeframe,
+        rank_last_period: r.rank_last_period,
+        period_suffix: r.period_suffix,
+        artist_url: r.artist_url,
+        image_url: r.cover_image_url || "",
+      },
+    }),
+  },
+  {
+    source: "spotify_daily_songs",
+    repo: "spotify-daily-scraper",
+    prefix: "spotify_daily_songs_",
+    parseRow: (r) => ({
+      chart_key: `spotify_daily_songs_${r.market}`,
+      rank: parseInt(r.rank, 10) || null,
+      artist_name: r.primary_artist_name || "",
+      track_name: r.track_name || "",
+      captured_at: toEpoch(r.captured_date),
+      metrics: {
+        market: r.market,
+        rank_change: r.rank_change,
+        streams: r.streams,
+        spotify_track_id: r.track_spotify_id,
+        spotify_artist_id: r.primary_artist_spotify_id,
+        image_url: r.image_url || "",
+      },
+    }),
+  },
+];
+
+async function listAllDataFiles(repo) {
+  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/contents/data`;
+  const res = await fetch(url, { headers: githubHeaders() });
+  if (!res.ok) throw new Error(`列出 ${repo}/data 失敗：HTTP ${res.status}`);
+  const items = await res.json();
+  return items.filter((i) => i.type === "file").map((i) => ({ name: i.name, download_url: i.download_url }));
+}
+
+function parseCsv(text) {
+  const cleaned = text.replace(/^\uFEFF/, "");
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  let i = 0;
+  const n = cleaned.length;
+
+  while (i < n) {
+    const ch = cleaned[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (cleaned[i + 1] === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      i++;
+      continue;
+    }
+    if (ch === ",") {
+      row.push(field);
+      field = "";
+      i++;
+      continue;
+    }
+    if (ch === "\r") {
+      i++;
+      continue;
+    }
+    if (ch === "\n") {
+      row.push(field);
+      field = "";
+      rows.push(row);
+      row = [];
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  if (!rows.length) return [];
+  const headers = rows[0];
+  return rows
+    .slice(1)
+    .filter((r) => !(r.length === 1 && r[0] === ""))
+    .map((values) => {
+      const obj = {};
+      headers.forEach((h, idx) => (obj[h] = values[idx] ?? ""));
+      return obj;
+    });
+}
+
+async function upsertSnapshots(rows) {
+  if (!rows.length) return;
+  const url = `${SUPABASE_URL}/rest/v1/chart_snapshots?on_conflict=source,chart_key,captured_at,artist_name,track_name`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(rows),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Supabase 寫入失敗：HTTP ${res.status} ${body.slice(0, 300)}`);
+  }
+}
+
+async function main() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    console.error("找不到 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY，先確認 .env 有填好。");
+    process.exit(1);
+  }
+
+  let totalInserted = 0;
+
+  for (const src of HISTORICAL_SOURCES) {
+    console.log(`\n=== ${src.source}（repo: ${src.repo}）===`);
+    let allFiles;
+    try {
+      allFiles = await listAllDataFiles(src.repo);
+    } catch (e) {
+      console.warn(`[warn] 列出檔案失敗：${e.message}`);
+      continue;
+    }
+    const matched = allFiles.filter((f) => f.name.startsWith(src.prefix));
+    console.log(`找到 ${matched.length} 個檔案`);
+
+    let sourceRows = [];
+    for (const f of matched) {
+      try {
+        const res = await fetch(f.download_url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const records = parseCsv(text);
+        for (const r of records) {
+          const mapped = src.parseRow(r);
+          sourceRows.push({ source: src.source, ...mapped });
+        }
+      } catch (e) {
+        console.warn(`[warn] 讀取 ${f.name} 失敗：${e.message}`);
+      }
+    }
+
+    // 同一批裡去重，避免同個自然鍵在同一個 upsert 指令裡出現兩次而整批失敗
+    const dedupMap = new Map();
+    for (const row of sourceRows) {
+      const key = `${row.source}|||${row.chart_key}|||${row.captured_at}|||${row.artist_name}|||${row.track_name}`;
+      dedupMap.set(key, row);
+    }
+    sourceRows = [...dedupMap.values()];
+    console.log(`共 ${sourceRows.length} 筆待寫入`);
+
+    const BATCH = 500;
+    for (let i = 0; i < sourceRows.length; i += BATCH) {
+      const batch = sourceRows.slice(i, i + BATCH);
+      try {
+        await upsertSnapshots(batch);
+        totalInserted += batch.length;
+        console.log(`  已寫入第 ${i}-${i + batch.length} 筆`);
+      } catch (e) {
+        console.warn(`[warn] 寫入第 ${i}-${i + batch.length} 筆失敗：${e.message}`);
+      }
+    }
+  }
+
+  console.log(`\n本次總計處理 ${totalInserted} 筆（已存在的會被覆蓋更新，不會重複）`);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
