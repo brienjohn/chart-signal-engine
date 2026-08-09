@@ -416,6 +416,12 @@ async function main() {
     const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
     const variance = scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length;
     const stdDev = Math.sqrt(variance);
+    console.log(`平均值 ${mean.toFixed(2)}，標準差 ${stdDev.toFixed(2)}，門檻是 ${TIER3_ZSCORE_THRESHOLD} 個標準差`);
+    const sortedDebug = tier3Pool
+      .map((c) => ({ type: c.type, group: c.info.label, score: c.score, z: stdDev > 0 ? (c.score - mean) / stdDev : null }))
+      .sort((a, b) => b.score - a.score);
+    console.log("分數由高到低：");
+    for (const s of sortedDebug) console.log(`  ${s.type}/${s.group}：分數 ${s.score.toFixed(2)}（z=${s.z?.toFixed(2)}）`);
     if (stdDev > 0) {
       for (const c of tier3Pool) {
         if ((c.score - mean) / stdDev >= TIER3_ZSCORE_THRESHOLD) {
