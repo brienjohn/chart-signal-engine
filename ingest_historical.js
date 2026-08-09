@@ -88,11 +88,29 @@ const HISTORICAL_SOURCES = [
 ];
 
 async function listAllDataFiles(repo) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/contents/data`;
-  const res = await fetch(url, { headers: githubHeaders() });
-  if (!res.ok) throw new Error(`列出 ${repo}/data 失敗：HTTP ${res.status}`);
-  const items = await res.json();
-  return items.filter((i) => i.type === "file").map((i) => ({ name: i.name, download_url: i.download_url }));
+  // StreetVoice 這種大型 repo，data 資料夾裡混著即時榜長期累積下來的大量檔案，
+  // 用一般的目錄列表 API 會被 GitHub 默默截斷（跟之前踩過的坑一樣），
+  // 改用 Git Trees API 一次拿到完整的檔案樹，不會有這個問題
+  const repoInfoRes = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${repo}`, { headers: githubHeaders() });
+  if (!repoInfoRes.ok) throw new Error(`讀取 repo 資訊失敗：HTTP ${repoInfoRes.status}`);
+  const repoInfo = await repoInfoRes.json();
+  const defaultBranch = repoInfo.default_branch || "main";
+
+  const treeRes = await fetch(
+    `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/git/trees/${defaultBranch}?recursive=1`,
+    { headers: githubHeaders() }
+  );
+  if (!treeRes.ok) throw new Error(`讀取檔案樹失敗：HTTP ${treeRes.status}`);
+  const treeData = await treeRes.json();
+  if (treeData.truncated) {
+    console.warn(`[warn] ${repo} 的檔案樹太大，Git Trees API 也被截斷了，可能還是會漏掉部分檔案`);
+  }
+  return (treeData.tree || [])
+    .filter((item) => item.type === "blob" && item.path.startsWith("data/"))
+    .map((item) => ({
+      name: item.path.replace(/^data\//, ""),
+      download_url: `https://raw.githubusercontent.com/${GITHUB_OWNER}/${repo}/${defaultBranch}/${item.path}`,
+    }));
 }
 
 function parseCsv(text) {
