@@ -304,18 +304,21 @@ function bestCandidatesForChart(chartKey, periodsMap) {
 function buildSignalRow(type, group, cand, today) {
   const cur = cand.cur;
   const name = [cur.track_name, cur.artist_name].filter(Boolean).join(" — ") || cur.artist_name || cur.track_name;
-  let title, description;
+  let title, description, extraMetrics = {};
 
   if (type === "劇烈變動") {
     title = `〈${name}〉在 ${group.label} 名次跳升`;
     description = `第 ${cand.prev.rank} 名 → 第 ${cand.cur.rank} 名`;
+    extraMetrics = { rank_before: cand.prev.rank, rank_after: cand.cur.rank };
   } else if (type === "新進榜") {
     const isChampion = cand.cur.rank === 1;
     title = `〈${name}〉在 ${group.label} ${isChampion ? "空降冠軍" : "空降"}`;
     description = isChampion ? `首次登場即空降冠軍` : `首次登場即拿下第 ${cand.cur.rank} 名`;
+    extraMetrics = { rank: cand.cur.rank, is_champion: isChampion };
   } else {
     title = `〈${name}〉在 ${group.label} 持續上升`;
     description = `本週名次 ${cand.ranks.join(" → ")}`;
+    extraMetrics = { rank_history: cand.ranks, climbed: cand.climbed };
   }
 
   return {
@@ -332,6 +335,7 @@ function buildSignalRow(type, group, cand, today) {
       tier: group.tier,
       chart_key: cand.chartKey,
       strength: cand.score ?? cand.pct ?? null,
+      ...extraMetrics,
     },
     image_url: imageOf(cur),
   };
