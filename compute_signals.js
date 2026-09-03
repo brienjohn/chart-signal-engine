@@ -141,6 +141,23 @@ function imageOf(row) {
   return row?.metrics?.image_url || row?.metrics?.cover_image_url || null;
 }
 
+// 從 chart_snapshots 裡已經存在的欄位組出可以直接點擊收聽的連結：
+// Spotify 用歌曲/藝人 ID 組網址，KKBOX 直接就有現成的完整網址；
+// YouTube 目前爬蟲沒有抓連結，這裡會是 null，前端要處理「沒有連結」的情況
+function linkOf(row) {
+  const m = row?.metrics || {};
+  const src = row?.source || "";
+  if (src.startsWith("spotify")) {
+    if (m.spotify_track_id) return `https://open.spotify.com/track/${m.spotify_track_id}`;
+    if (m.spotify_artist_id) return `https://open.spotify.com/artist/${m.spotify_artist_id}`;
+    return null;
+  }
+  if (src.startsWith("kkbox")) {
+    return m.song_url || m.artist_url || null;
+  }
+  return null;
+}
+
 // ---- 分組邏輯：把細分的 chart_key 併成邏輯上的同一組，同一件事不會因為子榜不同被講兩次 ----
 function getGroupInfo(chartKey) {
   if (chartKey.startsWith("kkbox_kma_mandarin_") || chartKey.startsWith("kkbox_mandarin_")) {
@@ -338,6 +355,7 @@ function buildSignalRow(type, group, cand, today) {
       ...extraMetrics,
     },
     image_url: imageOf(cur),
+    link_url: linkOf(cur),
   };
 }
 
