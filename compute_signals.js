@@ -112,6 +112,21 @@ async function fetchAllSnapshots() {
   return all;
 }
 
+async function clearExistingSignals() {
+  const url = `${SUPABASE_URL}/rest/v1/chart_signals?id=gte.0`; // gte.0 當條件是因為 REST 介面要求 DELETE 一定要帶篩選條件，這裡等於「全部都刪」
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`清除舊的 chart_signals 失敗：HTTP ${res.status} ${body.slice(0, 300)}`);
+  }
+}
+
 async function insertSignals(rows) {
   if (!rows.length) return;
   const url = `${SUPABASE_URL}/rest/v1/chart_signals`;
@@ -509,14 +524,20 @@ async function main() {
 
   const BATCH = 300;
   let written = 0;
-  for (let i = 0; i < finalSignals.length; i += BATCH) {
-    const batch = finalSignals.slice(i, i + BATCH);
-    try {
-      await insertSignals(batch);
-      written += batch.length;
-    } catch (e) {
-      console.warn(`[warn] 寫入第 ${i}-${i + batch.length} 筆失敗：${e.message}`);
+  if (finalSignals.length > 0) {
+    console.log("清除舊的 chart_signals...");
+    await clearExistingSignals();
+    for (let i = 0; i < finalSignals.length; i += BATCH) {
+      const batch = finalSignals.slice(i, i + BATCH);
+      try {
+        await insertSignals(batch);
+        written += batch.length;
+      } catch (e) {
+        console.warn(`[warn] 寫入第 ${i}-${i + batch.length} 筆失敗：${e.message}`);
+      }
     }
+  } else {
+    console.warn("[warn] 這次沒算出任何訊號，跳過清除／寫入，避免把資料庫清空卻沒有新資料可以補上");
   }
   console.log(`寫入 chart_signals：${written} 筆`);
 }
