@@ -582,6 +582,7 @@ async function main() {
           sources: ["iradio_playlist"],
           metrics: { group_id: "iradio", group_label: "iRadio 中廣", tier: 0, chart_key: "iradio_playlist", rank: i + 1, weekly_plays: item.count },
           image_url: null,
+          link_url: null,
         });
       });
     }
