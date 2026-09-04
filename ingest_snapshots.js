@@ -363,7 +363,7 @@ async function ingestIradio() {
     return {
       source,
       chart_key: "iradio_playlist",
-      rank: null,
+      rank: 0, // chart_snapshots 的 rank 欄位是 NOT NULL，電台沒有真正名次，用 0 佔位（compute_signals.js 本來就不會拿 iradio_playlist 的名次去跟其他榜比較）
       artist_name: artist,
       track_name: track,
       captured_at: toEpoch(date),
