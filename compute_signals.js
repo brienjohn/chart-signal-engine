@@ -94,13 +94,29 @@ function todayDateString() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" });
 }
 
+// 對 Supabase 的請求加上自動重試：資料庫現在量已經很大（40 萬筆以上），
+// 連續發出大量請求時，中途被斷線（ECONNRESET 這類網路層錯誤）的機率會提高，
+// 重試 3 次、每次間隔拉長，網路層失敗才重試，HTTP 4xx/5xx 這種真正的錯誤不重試（重試也沒用）
+async function fetchWithRetry(url, options, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, options);
+    } catch (e) {
+      if (attempt === retries) throw new Error(`連線失敗（已重試 ${retries} 次）：${e.message}`);
+      const wait = attempt * 1500;
+      console.warn(`[warn] 連線被中斷（${e.message}），${wait}ms 後重試第 ${attempt + 1} 次...`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 async function fetchAllSnapshots() {
   const all = [];
   let lastId = -1;
   const pageSize = 1000;
   while (true) {
     const url = `${SUPABASE_URL}/rest/v1/chart_snapshots?select=id,source,chart_key,rank,artist_name,track_name,captured_at,metrics&id=gt.${lastId}&order=id.asc&limit=${pageSize}`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       headers: { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
     });
     if (!res.ok) {
@@ -119,7 +135,7 @@ async function fetchAllSnapshots() {
 
 async function clearExistingSignals() {
   const url = `${SUPABASE_URL}/rest/v1/chart_signals?id=gte.0`; // gte.0 當條件是因為 REST 介面要求 DELETE 一定要帶篩選條件，這裡等於「全部都刪」
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: "DELETE",
     headers: {
       apikey: SUPABASE_SERVICE_ROLE_KEY,
@@ -135,7 +151,7 @@ async function clearExistingSignals() {
 async function insertSignals(rows) {
   if (!rows.length) return;
   const url = `${SUPABASE_URL}/rest/v1/chart_signals`;
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: "POST",
     headers: {
       apikey: SUPABASE_SERVICE_ROLE_KEY,
