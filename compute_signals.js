@@ -175,6 +175,9 @@ function linkOf(row) {
   if (src.startsWith("kkbox")) {
     return m.song_url || m.artist_url || null;
   }
+  if (src.startsWith("streetvoice")) {
+    return m.song_url || null;
+  }
   return null;
 }
 
@@ -241,6 +244,49 @@ function groupByChartAndPeriod(snapshots) {
 }
 
 // 對單一 chart_key，在最近一週的窗口內，各找出「最強的一個」候選（不是全部達標的都算）
+// 新進榜門檻：首次登場的名次百分比（1=衝進榜首）要達到這個來源歷史上的 95 百分位才算數，
+// 用 2026-09-04 分析（403,277 筆快照）的結果；樣本數太少（<100）的不信任算出來的數字，
+// 用同類型裡樣本數足夠的數字當備援
+const NEW_ENTRY_FLOOR = {
+  cashbox_台語點播週榜: 0.90, // 原始 0.933，樣本僅 55，稍微保守
+  cashbox_國語點播週榜: 0.90, // 原始 0.967，樣本僅 50，稍微保守
+  kkbox_japanese: 0.950,
+  kkbox_kma: 0.986,
+  kkbox_korean: 0.950,
+  kkbox_mandarin: 0.960,
+  kkbox_taiwanese: 0.960,
+  kkbox_western: 0.960,
+  spotify_daily: 0.940,
+  spotify_weekly: 0.925,
+  streetvoice_realtime: 0.960,
+  streetvoice_weekly: 0.960, // 原始 1.000（樣本 495 但幾乎都要衝第一才算），實務上太嚴格，放寬到跟 realtime 一致
+  youtube_top: 0.940,
+  youtube_trending: 0.933,
+};
+const DEFAULT_NEW_ENTRY_FLOOR = 0.9; // 沒對應到上面任何一種來源時的保守備援值
+function newEntryFloorFor(chartKey) {
+  return NEW_ENTRY_FLOOR[sourceTypeOf(chartKey)] ?? DEFAULT_NEW_ENTRY_FLOOR;
+}
+
+// 動能延續門檻：連續上升區段爬升的名次數，要達到這個來源歷史上的 95 百分位才算數。
+// KKBOX 除了 kma 之外都是週榜，一個 7 天窗口湊不到連續 3 期資料，結構上不可能有動能延續，
+// 這些類型不會走到這個函式（bestCandidatesForChart 本身就湊不出候選），不用列在表裡
+const MOMENTUM_FLOOR = {
+  cashbox_台語點播週榜: 7,
+  cashbox_國語點播週榜: 11,
+  kkbox_kma: 21,
+  spotify_daily: 74,
+  spotify_weekly: 65,
+  streetvoice_realtime: 23,
+  streetvoice_weekly: 17, // 原始 95 百分位是 16，但樣本只有 7 筆不可信，改用跟 realtime 接近的保守值
+  youtube_top: 38,
+  youtube_trending: 20,
+};
+const DEFAULT_MOMENTUM_FLOOR = 15; // 沒對應到上面任何一種來源時的保守備援值
+function momentumFloorFor(chartKey) {
+  return MOMENTUM_FLOOR[sourceTypeOf(chartKey)] ?? DEFAULT_MOMENTUM_FLOOR;
+}
+
 function bestCandidatesForChart(chartKey, periodsMap) {
   const allPeriods = [...periodsMap.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
   if (allPeriods.length < 2) return {};
@@ -282,19 +328,23 @@ function bestCandidatesForChart(chartKey, periodsMap) {
     if (best) result.jump = { ...best, chartSize, chartKey };
   }
 
-  // ---- 新進榜：本週窗口內首次出現、且名次最高（佔榜單百分比最深）的一首 ----
+  // ---- 新進榜：本週窗口內首次出現、且名次最高（佔榜單百分比最深）的一首，
+  // 要過這個來源歷史上的 95 百分位門檻才算數，不是「這週隨便一個新進榜」都算 ----
   {
+    const floor = newEntryFloorFor(chartKey);
     let best = null, bestPct = 0;
     for (const cur of weekEndRows) {
       if (everAppearedBeforeWindow.has(trackKey(cur)) || weekStartMap.has(trackKey(cur))) continue;
       if (cur.rank == null) continue;
       const pct = 1 - (cur.rank - 1) / chartSize;
+      if (pct < floor) continue;
       if (pct > bestPct) { bestPct = pct; best = { cur, pct, chartSize, chartKey }; }
     }
     if (best) result.newEntry = best;
   }
 
-  // ---- 動能延續：本週窗口內，連續上升區間爬升幅度（佔榜單百分比）最大的一段 ----
+  // ---- 動能延續：本週窗口內，連續上升區間（持平不算中斷，只有真的退步或缺席才算中斷）
+  // 爬升幅度最大的一段，要過這個來源歷史上的 95 百分位門檻才算數 ----
   {
     const trackHistory = new Map();
     for (const [, rows] of windowPeriods) {
@@ -310,21 +360,26 @@ function bestCandidatesForChart(chartKey, periodsMap) {
       }
     }
     let best = null, bestPct = 0;
+    const floor = momentumFloorFor(chartKey);
     for (const [key, ranks] of trackHistory) {
       if (ranks.length < MOMENTUM_MIN_STREAK + 1) continue;
       let streakStart = 0;
       for (let i = 1; i <= ranks.length; i++) {
-        const broke = i === ranks.length || ranks[i] == null || ranks[i - 1] == null || ranks[i] >= ranks[i - 1];
+        // 只有真的退步或缺席才算中斷，持平不算——持平代表這幾天沒有輸給任何人，
+        // 不該因為單一天沒有「更進一步」就把前後兩段本來是同一段的連續上升拆開
+        const broke = i === ranks.length || ranks[i] == null || ranks[i - 1] == null || ranks[i] > ranks[i - 1];
         if (broke) {
           const streakLen = i - streakStart;
           if (streakLen >= MOMENTUM_MIN_STREAK && ranks[streakStart] != null && ranks[i - 1] != null) {
             const climbed = ranks[streakStart] - ranks[i - 1];
-            const pct = climbed / chartSize;
-            if (pct > bestPct) {
-              const latestRow = weekEndRows.find((r) => trackKey(r) === key);
-              if (latestRow) {
-                bestPct = pct;
-                best = { cur: latestRow, ranks: ranks.slice(streakStart, i), pct, climbed, chartSize, chartKey };
+            if (climbed >= floor) {
+              const pct = climbed / chartSize;
+              if (pct > bestPct) {
+                const latestRow = weekEndRows.find((r) => trackKey(r) === key);
+                if (latestRow) {
+                  bestPct = pct;
+                  best = { cur: latestRow, ranks: ranks.slice(streakStart, i), pct, climbed, chartSize, chartKey };
+                }
               }
             }
           }
