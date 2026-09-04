@@ -29,7 +29,7 @@ const SOURCES = [
     parseRow: (r) => ({
       chart_key: `spotify_daily_songs_${r.market}`,
       rank: parseInt(r.rank, 10) || null,
-      artist_name: r.primary_artist_name || "",
+      artist_name: r.artist_names || "",
       track_name: r.track_name || "",
       captured_at: toEpoch(r.captured_date),
       metrics: {
@@ -37,7 +37,7 @@ const SOURCES = [
         rank_change: r.rank_change,
         streams: r.streams,
         spotify_track_id: r.track_spotify_id,
-        spotify_artist_id: r.primary_artist_spotify_id,
+        spotify_artist_id: (r.artist_spotify_ids || "").split(";")[0]?.trim() || "",
         image_url: r.image_url || "",
       },
     }),
