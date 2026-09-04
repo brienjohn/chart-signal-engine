@@ -344,16 +344,14 @@ function bestCandidatesForChart(chartKey, periodsMap) {
     if (best) result.jump = { ...best, chartSize, chartKey };
   }
 
-  // ---- 新進榜：本週窗口內首次出現、且名次最高（佔榜單百分比最深）的一首，
-  // 要過這個來源歷史上的 95 百分位門檻才算數，不是「這週隨便一個新進榜」都算 ----
+  // ---- 新進榜：本週窗口內首次出現、且名次最高（佔榜單百分比最深）的一首。
+  // 這裡先不套歷史門檻——Tier 1 靠這個保底，門檻改成只在組 Tier 2/3 池子時才檢查 ----
   {
-    const floor = newEntryFloorFor(chartKey);
     let best = null, bestPct = 0;
     for (const cur of weekEndRows) {
       if (everAppearedBeforeWindow.has(trackKey(cur)) || weekStartMap.has(trackKey(cur))) continue;
       if (cur.rank == null) continue;
       const pct = 1 - (cur.rank - 1) / chartSize;
-      if (pct < floor) continue;
       if (pct > bestPct) { bestPct = pct; best = { cur, pct, chartSize, chartKey }; }
     }
     if (best) result.newEntry = best;
@@ -376,7 +374,6 @@ function bestCandidatesForChart(chartKey, periodsMap) {
       }
     }
     let best = null, bestPct = 0;
-    const floor = momentumFloorFor(chartKey);
     for (const [key, ranks] of trackHistory) {
       if (ranks.length < MOMENTUM_MIN_STREAK + 1) continue;
       let streakStart = 0;
@@ -388,14 +385,12 @@ function bestCandidatesForChart(chartKey, periodsMap) {
           const streakLen = i - streakStart;
           if (streakLen >= MOMENTUM_MIN_STREAK && ranks[streakStart] != null && ranks[i - 1] != null) {
             const climbed = ranks[streakStart] - ranks[i - 1];
-            if (climbed >= floor) {
-              const pct = climbed / chartSize;
-              if (pct > bestPct) {
-                const latestRow = weekEndRows.find((r) => trackKey(r) === key);
-                if (latestRow) {
-                  bestPct = pct;
-                  best = { cur: latestRow, ranks: ranks.slice(streakStart, i), pct, climbed, chartSize, chartKey };
-                }
+            const pct = climbed / chartSize;
+            if (pct > bestPct) {
+              const latestRow = weekEndRows.find((r) => trackKey(r) === key);
+              if (latestRow) {
+                bestPct = pct;
+                best = { cur: latestRow, ranks: ranks.slice(streakStart, i), pct, climbed, chartSize, chartKey };
               }
             }
           }
@@ -520,8 +515,8 @@ async function main() {
   for (const [, gb] of groupBest) {
     if (gb.info.tier !== 2) continue;
     if (gb.jump && passesMajorActGate(gb.jump)) tier2Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.score });
-    if (gb.newEntry) tier2Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
-    if (gb.momentum) tier2Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
+    if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) tier2Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) tier2Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
   }
   tier2Pool.sort((a, b) => b.score - a.score);
   for (const c of tier2Pool.slice(0, TIER2_POOL_SIZE)) {
@@ -534,8 +529,8 @@ async function main() {
     // 劇烈變動改用「相對這個來源自己門檻的倍數」，不是原始跳動幅度，
     // 不然波動天生就小的來源（例如 Cashbox）永遠比不過波動大的來源
     if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.jump / jumpFloorFor(gb.jump.chartKey) });
-    if (gb.newEntry) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
-    if (gb.momentum) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
+    if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
   }
   console.log(`Tier 3 候選池：${tier3Pool.length} 個（要 >= 10 才會開始比較離群值）`);
   if (tier3Pool.length >= 10) {
