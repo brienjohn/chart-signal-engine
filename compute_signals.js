@@ -173,7 +173,7 @@ function linkOf(row) {
     return null;
   }
   if (src.startsWith("kkbox")) {
-    return m.song_url || m.artist_url || null;
+    return m.song_url || m.album_url || m.artist_url || null;
   }
   if (src.startsWith("streetvoice")) {
     return m.song_url || null;

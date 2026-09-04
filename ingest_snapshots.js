@@ -86,6 +86,8 @@ const SOURCES = [
         rank_last_period: r.rank_last_period,
         period_suffix: r.period_suffix,
         artist_url: r.artist_url,
+        song_url: r.song_url,
+        album_url: r.album_url,
         image_url: r.cover_image_url || "",
       },
     }),
@@ -311,6 +313,79 @@ async function insertSnapshots(rows) {
   }
 }
 
+// ---- 電台（iRadio）：原始資料是「每次播放一列」，要先依日期＋歌名＋演唱者聚合算出
+// 「這天播了幾次」，才是 compute_signals.js 看得懂的格式；資料量不大，直接列目錄就好，
+// 不用像其他來源那樣繞去看 commit 差異 ----
+async function ingestIradio() {
+  const source = "iradio";
+  const repo = "iradio-scraper";
+  let listing;
+  try {
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/contents/data`;
+    const res = await fetch(url, { headers: githubHeaders() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    listing = await res.json();
+  } catch (e) {
+    console.warn(`[warn] ${source} 列出檔案失敗：${e.message}`);
+    return 0;
+  }
+
+  // 只取最近 10 天的日期檔（iradio_YYYY-MM-DD.csv）；iradio_today.csv 是滾動更新的當天檔案，
+  // 跟當天的日期檔內容會重複，不用另外抓
+  const dated = listing
+    .filter((f) => /^iradio_\d{4}-\d{2}-\d{2}\.csv$/.test(f.name))
+    .sort((a, b) => (a.name < b.name ? 1 : -1))
+    .slice(0, 10);
+
+  let allRows = [];
+  for (const f of dated) {
+    try {
+      const res = await fetch(f.download_url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      allRows.push(...parseCsv(await res.text()));
+    } catch (e) {
+      console.warn(`[warn] ${source} 讀取 ${f.name} 失敗：${e.message}`);
+    }
+  }
+
+  const counts = new Map();
+  for (const r of allRows) {
+    const date = (r["日期"] || "").trim();
+    const track = (r["歌曲名稱"] || "").trim();
+    const artist = (r["演唱(奏)者"] || "").trim();
+    if (!date || (!track && !artist)) continue;
+    const key = `${date}|||${artist}|||${track}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const rows = [...counts.entries()].map(([key, count]) => {
+    const [date, artist, track] = key.split("|||");
+    return {
+      source,
+      chart_key: "iradio_playlist",
+      rank: null,
+      artist_name: artist,
+      track_name: track,
+      captured_at: toEpoch(date),
+      metrics: { play_count_that_day: count },
+    };
+  });
+
+  const BATCH = 500;
+  let inserted = 0;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const batch = rows.slice(i, i + BATCH);
+    try {
+      await insertSnapshots(batch);
+      inserted += batch.length;
+    } catch (e) {
+      console.warn(`[warn] ${source} 寫入 Supabase 失敗（第 ${i}-${i + batch.length} 筆）：${e.message}`);
+    }
+  }
+  console.log(`[${source}] ${dated.length} 個檔案，聚合成 ${rows.length} 筆（每首歌每天一筆）-> 寫入 ${inserted} 筆`);
+  return inserted;
+}
+
 async function main() {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     console.error("找不到 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY，先確認 .env 有填好。");
@@ -381,6 +456,9 @@ async function main() {
   }
 
   console.log(`本次總計寫入 ${totalInserted} 筆到 chart_snapshots`);
+
+  const iradioInserted = await ingestIradio();
+  console.log(`（其中電台 iRadio：${iradioInserted} 筆）`);
 }
 
 main().catch((e) => {
