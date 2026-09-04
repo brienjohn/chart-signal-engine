@@ -96,18 +96,23 @@ function todayDateString() {
 
 async function fetchAllSnapshots() {
   const all = [];
-  let offset = 0;
+  let lastId = -1;
   const pageSize = 1000;
   while (true) {
-    const url = `${SUPABASE_URL}/rest/v1/chart_snapshots?select=id,source,chart_key,rank,artist_name,track_name,captured_at,metrics&order=chart_key.asc,captured_at.asc&limit=${pageSize}&offset=${offset}`;
+    const url = `${SUPABASE_URL}/rest/v1/chart_snapshots?select=id,source,chart_key,rank,artist_name,track_name,captured_at,metrics&id=gt.${lastId}&order=id.asc&limit=${pageSize}`;
     const res = await fetch(url, {
       headers: { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
     });
-    if (!res.ok) throw new Error(`讀取 chart_snapshots 失敗：HTTP ${res.status}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`讀取 chart_snapshots 失敗：HTTP ${res.status} ${body.slice(0, 300)}`);
+    }
     const page = await res.json();
+    if (page.length === 0) break;
     all.push(...page);
+    lastId = page[page.length - 1].id;
+    console.log(`已讀取 ${all.length} 筆快照...`);
     if (page.length < pageSize) break;
-    offset += pageSize;
   }
   return all;
 }
