@@ -1,5 +1,5 @@
 // 訊號引擎 - 分層架構版
-// Tier 1（關切榜單：KKBOX華語／Spotify台灣／Spotify全球／StreetVoice總榜／YouTube台灣，保底 1-2 則）
+// Tier 1（關切榜單：KKBOX華語／Spotify台灣／Spotify全球／StreetVoice總榜／YouTube台灣／YouTube全球，保底 1-2 則）
 // Tier 2（東南亞+日韓市場，Spotify+YouTube，每個平台各自獨立判斷：過了自己的歷史門檻就給 1 則，
 //         沒過就跳過，不用互相搶名額——這樣才不會因為候選少就被台灣/全球的強訊號擠掉）
 // Tier 3（其餘全部，只有極端離群才露出，資料量還淺時常態是空的）
@@ -214,6 +214,9 @@ function getGroupInfo(chartKey) {
   if (chartKey.startsWith("youtube_") && chartKey.endsWith("_tw")) {
     return { groupId: "youtube_tw", tier: 1, label: "YouTube 台灣" };
   }
+  if (chartKey.startsWith("youtube_") && chartKey.endsWith("_global")) {
+    return { groupId: "youtube_global", tier: 1, label: "YouTube 全球" };
+  }
 
   for (const m of ASIA_POOL_MARKETS) {
     if (chartKey === `spotify_daily_songs_${m}` || chartKey === `spotify_weekly_artists_${m}`) {
@@ -242,7 +245,7 @@ function getGroupInfo(chartKey) {
     return { groupId: "iradio", tier: 3, label: "iRadio 中廣" };
   }
   if (chartKey.startsWith("youtube_")) {
-    return { groupId: "youtube_global", tier: 3, label: "YouTube 全球" };
+    return { groupId: chartKey, tier: 3, label: chartKey };
   }
   return { groupId: chartKey, tier: 3, label: chartKey };
 }
@@ -322,6 +325,15 @@ function bestCandidatesForChart(chartKey, periodsMap) {
     for (const r of rows) everAppearedBeforeWindow.add(trackKey(r));
   }
 
+  // 「今天以前出現過」要涵蓋窗口內的每一天（不只是窗口第一天），
+  // 不然一首歌窗口第 3 天才第一次上榜、第 7 天還在，會被誤判成「今天才空降」
+  const todayKey = windowPeriods[windowPeriods.length - 1][0];
+  const appearedBeforeToday = new Set(everAppearedBeforeWindow);
+  for (const [t, rows] of windowPeriods) {
+    if (t === todayKey) continue;
+    for (const r of rows) appearedBeforeToday.add(trackKey(r));
+  }
+
   const result = {};
 
   // ---- 劇烈變動：漲幅要先過這個榜自己來源類型的絕對門檻（真實資料的95百分位），
@@ -349,7 +361,7 @@ function bestCandidatesForChart(chartKey, periodsMap) {
   {
     let best = null, bestPct = 0;
     for (const cur of weekEndRows) {
-      if (everAppearedBeforeWindow.has(trackKey(cur)) || weekStartMap.has(trackKey(cur))) continue;
+      if (appearedBeforeToday.has(trackKey(cur))) continue;
       if (cur.rank == null) continue;
       const pct = 1 - (cur.rank - 1) / chartSize;
       if (pct > bestPct) { bestPct = pct; best = { cur, pct, chartSize, chartKey }; }
@@ -383,7 +395,10 @@ function bestCandidatesForChart(chartKey, periodsMap) {
         const broke = i === ranks.length || ranks[i] == null || ranks[i - 1] == null || ranks[i] > ranks[i - 1];
         if (broke) {
           const streakLen = i - streakStart;
-          if (streakLen >= MOMENTUM_MIN_STREAK && ranks[streakStart] != null && ranks[i - 1] != null) {
+          // 只看「延續到今天」的這一段——如果這段漲勢中途就斷了、今天已經持平或退步，
+          // 不該把它當成「現在的動能」端出來，那是舊聞，不是這週真正發生的事
+          const stillOngoingToday = i === ranks.length;
+          if (stillOngoingToday && streakLen >= MOMENTUM_MIN_STREAK && ranks[streakStart] != null && ranks[i - 1] != null) {
             const climbed = ranks[streakStart] - ranks[i - 1];
             const pct = climbed / chartSize;
             if (pct > bestPct) {
