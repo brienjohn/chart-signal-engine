@@ -1,6 +1,7 @@
 // 訊號引擎 - 分層架構版
 // Tier 1（關切榜單：KKBOX華語／Spotify台灣／Spotify全球／StreetVoice總榜／YouTube台灣，保底 1-2 則）
-// Tier 2（東南亞+日韓市場池，Spotify+YouTube，全池取前 5）
+// Tier 2（東南亞+日韓市場，Spotify+YouTube，每個平台各自獨立判斷：過了自己的歷史門檻就給 1 則，
+//         沒過就跳過，不用互相搶名額——這樣才不會因為候選少就被台灣/全球的強訊號擠掉）
 // Tier 3（其餘全部，只有極端離群才露出，資料量還淺時常態是空的）
 import "dotenv/config";
 
@@ -10,7 +11,6 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const MOMENTUM_MIN_STREAK = 3;
 const TIER1_MAX_PER_GROUP = 2;
-const TIER2_POOL_SIZE = 5;
 const TIER3_ZSCORE_THRESHOLD = 3.5; // Tier 3 用的是「這週所有候選訊號裡誰特別突出」，跟劇烈變動門檻是不同機制
 
 // 各來源「正常」波動幅度差很多，用同一個數字當門檻對誰都不公平。
@@ -260,45 +260,45 @@ function groupByChartAndPeriod(snapshots) {
 }
 
 // 對單一 chart_key，在最近一週的窗口內，各找出「最強的一個」候選（不是全部達標的都算）
-// 新進榜門檻：首次登場的名次百分比（1=衝進榜首）要達到這個來源歷史上的 95 百分位才算數，
-// 用 2026-09-04 分析（403,277 筆快照）的結果；樣本數太少（<100）的不信任算出來的數字，
-// 用同類型裡樣本數足夠的數字當備援
+// 新進榜門檻：首次登場的名次百分比（1=衝進榜首）要達到這個來源歷史上的 90 百分位才算數，
+// 用 2026-09-04 分析（403,277 筆快照）的結果；90 百分位比 95 百分位溫和，避免太嚴格導致
+// 整週篩不出任何訊號；樣本數太少（<100）的不信任算出來的數字，用同類型裡樣本數足夠的當備援
 const NEW_ENTRY_FLOOR = {
-  cashbox_台語點播週榜: 0.90, // 原始 0.933，樣本僅 55，稍微保守
-  cashbox_國語點播週榜: 0.90, // 原始 0.967，樣本僅 50，稍微保守
-  kkbox_japanese: 0.950,
-  kkbox_kma: 0.986,
-  kkbox_korean: 0.950,
-  kkbox_mandarin: 0.960,
-  kkbox_taiwanese: 0.960,
-  kkbox_western: 0.960,
-  spotify_daily: 0.940,
-  spotify_weekly: 0.925,
-  streetvoice_realtime: 0.960,
-  streetvoice_weekly: 0.960, // 原始 1.000（樣本 495 但幾乎都要衝第一才算），實務上太嚴格，放寬到跟 realtime 一致
-  youtube_top: 0.940,
-  youtube_trending: 0.933,
+  cashbox_台語點播週榜: 0.85, // 原始 90 百分位 0.867，樣本僅 55，稍微保守
+  cashbox_國語點播週榜: 0.85, // 原始 90 百分位 0.900，樣本僅 50，稍微保守
+  kkbox_japanese: 0.900,
+  kkbox_kma: 0.972,
+  kkbox_korean: 0.900,
+  kkbox_mandarin: 0.910,
+  kkbox_taiwanese: 0.910,
+  kkbox_western: 0.910,
+  spotify_daily: 0.874,
+  spotify_weekly: 0.850,
+  streetvoice_realtime: 0.920,
+  streetvoice_weekly: 0.900, // 原始 90 百分位 0.950 仍偏嚴，放寬到跟 realtime 接近
+  youtube_top: 0.880,
+  youtube_trending: 0.867,
 };
-const DEFAULT_NEW_ENTRY_FLOOR = 0.9; // 沒對應到上面任何一種來源時的保守備援值
+const DEFAULT_NEW_ENTRY_FLOOR = 0.85; // 沒對應到上面任何一種來源時的保守備援值
 function newEntryFloorFor(chartKey) {
   return NEW_ENTRY_FLOOR[sourceTypeOf(chartKey)] ?? DEFAULT_NEW_ENTRY_FLOOR;
 }
 
-// 動能延續門檻：連續上升區段爬升的名次數，要達到這個來源歷史上的 95 百分位才算數。
+// 動能延續門檻：連續上升區段爬升的名次數，要達到這個來源歷史上的 90 百分位才算數。
 // KKBOX 除了 kma 之外都是週榜，一個 7 天窗口湊不到連續 3 期資料，結構上不可能有動能延續，
 // 這些類型不會走到這個函式（bestCandidatesForChart 本身就湊不出候選），不用列在表裡
 const MOMENTUM_FLOOR = {
-  cashbox_台語點播週榜: 7,
-  cashbox_國語點播週榜: 11,
-  kkbox_kma: 21,
-  spotify_daily: 74,
-  spotify_weekly: 65,
-  streetvoice_realtime: 23,
-  streetvoice_weekly: 17, // 原始 95 百分位是 16，但樣本只有 7 筆不可信，改用跟 realtime 接近的保守值
-  youtube_top: 38,
-  youtube_trending: 20,
+  cashbox_台語點播週榜: 6,
+  cashbox_國語點播週榜: 8,
+  kkbox_kma: 17,
+  spotify_daily: 58,
+  spotify_weekly: 45,
+  streetvoice_realtime: 17,
+  streetvoice_weekly: 12, // 原始樣本只有 7 筆不可信，用比 realtime 稍寬鬆的保守值
+  youtube_top: 29,
+  youtube_trending: 17,
 };
-const DEFAULT_MOMENTUM_FLOOR = 15; // 沒對應到上面任何一種來源時的保守備援值
+const DEFAULT_MOMENTUM_FLOOR = 10; // 沒對應到上面任何一種來源時的保守備援值
 function momentumFloorFor(chartKey) {
   return MOMENTUM_FLOOR[sourceTypeOf(chartKey)] ?? DEFAULT_MOMENTUM_FLOOR;
 }
@@ -497,8 +497,15 @@ async function main() {
     if (gb.newEntry) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
     if (gb.momentum) candidates.push({ type: "動能延續", cand: gb.momentum, score: momentumScore(gb.momentum) });
     candidates.sort((a, b) => b.score - a.score);
-    for (const c of candidates.slice(0, TIER1_MAX_PER_GROUP)) {
+    const usedTracks = new Set();
+    let picked = 0;
+    for (const c of candidates) {
+      if (picked >= TIER1_MAX_PER_GROUP) break;
+      const key = trackKey(c.cand.cur);
+      if (usedTracks.has(key)) continue; // 同一首歌已經被選過（不管是哪個類型），不重複選
+      usedTracks.add(key);
       finalSignals.push(buildSignalRow(c.type, gb.info, c.cand, today));
+      picked++;
     }
   }
 
@@ -511,16 +518,17 @@ async function main() {
     return cand.jump >= floor * MAJOR_ACT_FLOOR_MULTIPLIER;
   }
 
-  const tier2Pool = [];
+  // Tier 2 改成每個平台各自獨立判斷：過了自己的歷史門檻就給 1 則，沒有就跳過，
+  // 不用跟其他平台搶名額——避免東南亞/日韓市場因為候選少，一直被台灣/全球的強訊號擠掉
   for (const [, gb] of groupBest) {
     if (gb.info.tier !== 2) continue;
-    if (gb.jump && passesMajorActGate(gb.jump)) tier2Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.score });
-    if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) tier2Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
-    if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) tier2Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
-  }
-  tier2Pool.sort((a, b) => b.score - a.score);
-  for (const c of tier2Pool.slice(0, TIER2_POOL_SIZE)) {
-    finalSignals.push(buildSignalRow(c.type, c.info, c.cand, today));
+    const candidates = [];
+    if (gb.jump && passesMajorActGate(gb.jump)) candidates.push({ type: "劇烈變動", cand: gb.jump, score: gb.jump.score });
+    if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) candidates.push({ type: "動能延續", cand: gb.momentum, score: momentumScore(gb.momentum) });
+    if (!candidates.length) continue; // 這個平台這週沒有過門檻的候選，就不勉強塞訊號
+    candidates.sort((a, b) => b.score - a.score);
+    finalSignals.push(buildSignalRow(candidates[0].type, gb.info, candidates[0].cand, today));
   }
 
   const tier3Pool = [];
