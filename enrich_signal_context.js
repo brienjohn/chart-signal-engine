@@ -36,6 +36,48 @@ async function updateContextBlurb(id, blurb) {
   }
 }
 
+// ---- 快取層：chart_signals 每次都會被 compute_signals.js 整批清空重建，
+// 舊資料的背景說明會直接消失，不能只在同一張表裡查「之前寫過沒」，
+// 要用一張獨立、不會被清空邏輯影響的快取表 ----
+const CACHE_FRESH_DAYS = 21; // 超過這個天數的快取視為過期，重新查一次
+
+function cacheKeyOf(signal) {
+  const artist = (signal.artist_name || "").trim().toLowerCase();
+  const track = (signal.track_name || "").trim().toLowerCase();
+  return `${artist}|||${track}`;
+}
+
+async function fetchCachedContext(cacheKey) {
+  const url = `${SUPABASE_URL}/rest/v1/signal_context_cache?cache_key=eq.${encodeURIComponent(cacheKey)}&select=context_blurb,updated_at&limit=1`;
+  const res = await fetch(url, {
+    headers: { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
+  });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  if (!rows.length) return null;
+  const ageMs = Date.now() - new Date(rows[0].updated_at).getTime();
+  if (ageMs > CACHE_FRESH_DAYS * 24 * 60 * 60 * 1000) return null; // 過期，當作沒快取
+  return rows[0].context_blurb;
+}
+
+async function upsertCache(cacheKey, blurb) {
+  const url = `${SUPABASE_URL}/rest/v1/signal_context_cache?on_conflict=cache_key`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify({ cache_key: cacheKey, context_blurb: blurb, updated_at: new Date().toISOString() }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.warn(`[warn] 寫入快取失敗：HTTP ${res.status} ${body.slice(0, 200)}`);
+  }
+}
+
 // 這份 prompt 是照使用者提供、參考自 ChatGPT 建議的完整版判斷邏輯精簡而來：
 // 保留「查證範圍寬、寫入標準窄」「不對知名藝人寫廢話、對冷門藝人補脈絡」「避免空泛形容詞」
 // 這幾條核心原則，但把輸出砍到只剩最終一句話（原版的可用面向/不宜誇大/資料來源三段，
@@ -105,20 +147,32 @@ async function main() {
   const signals = await fetchSignalsNeedingContext();
   console.log(`共 ${signals.length} 則需要補充`);
 
-  let done = 0, skipped = 0, failed = 0;
+  let done = 0, skipped = 0, failed = 0, cached = 0;
 
   for (const signal of signals) {
     const name = [signal.track_name, signal.artist_name].filter(Boolean).join(" — ") || signal.artist_name || signal.track_name || "";
+    const cacheKey = cacheKeyOf(signal);
+
+    const cachedBlurb = await fetchCachedContext(cacheKey);
+    if (cachedBlurb !== null) {
+      await updateContextBlurb(signal.id, cachedBlurb);
+      cached++;
+      console.log(`[命中快取] ${name} -> ${cachedBlurb || "（先前查無資料，留空）"}`);
+      continue;
+    }
+
     console.log(`[查詢中] ${name}`);
     try {
       const prompt = buildPrompt(signal);
       const result = await callClaude(prompt);
       if (!result || result.includes("NO_CONTEXT")) {
         await updateContextBlurb(signal.id, "");
+        await upsertCache(cacheKey, "");
         skipped++;
         console.log(`  -> 查無有效背景，留空`);
       } else {
         await updateContextBlurb(signal.id, result);
+        await upsertCache(cacheKey, result);
         done++;
         console.log(`  -> ${result}`);
       }
@@ -129,7 +183,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 500));
   }
 
-  console.log(`完成：${done} 則寫入背景說明，${skipped} 則查無資料留空，${failed} 則失敗`);
+  console.log(`完成：${done} 則新查詢寫入，${cached} 則命中快取直接沿用，${skipped} 則查無資料留空，${failed} 則失敗`);
 }
 
 main().catch((e) => {
