@@ -75,14 +75,19 @@ function positionWeight(finalRank, chartSize) {
   return 1 + (1 - (finalRank - 1) / chartSize);
 }
 // 新進榜／動能延續原本用「佔榜單百分比」計分，最高封頂在固定值，
-// 一旦好幾個候選同時衝到頂，會全部黏在天花板上，讓後面的離群值比較失去意義。
-// 改成沒有上限的算法：新進榜用「榜單總長度 ÷ 名次」（大榜衝進前面分數更高，
-// 不會跟小榜衝第一名拿一樣的分數）；動能延續用實際爬升的名次數（不除以榜單大小封頂）
+// 三種訊號類型的分數公式量級完全不同（劇烈變動是「跳幅×位置加權」、新進榜是「榜單大小÷名次」、
+// 動能延續是「爬升名次數」），直接比大小等於拿蘋果比橘子——同一組裡誰的公式剛好算出比較大的原始數字就贏，
+// 跟「這次表現相對自己這個類型的正常水準有多突出」完全無關（例如新進榜衝進前 3 名，分數天生就贏不了
+// 劇烈變動的公式，不是因為不夠格，只是公式量級不對等）。統一改成「這次表現是自己歷史門檻的幾倍」，
+// 三種類型才能公平放在一起比較、排前幾名
 function newEntryScore(cand) {
-  return cand.chartSize / cand.cur.rank;
+  return cand.pct / newEntryFloorFor(cand.chartKey);
 }
 function momentumScore(cand) {
-  return cand.climbed;
+  return cand.climbed / momentumFloorFor(cand.chartKey);
+}
+function jumpScore(cand) {
+  return cand.jump / jumpFloorFor(cand.chartKey);
 }
 
 const ASIA_POOL_MARKETS = ["vn", "th", "id", "in", "sg", "my", "jp", "kr"];
@@ -508,7 +513,7 @@ async function main() {
   for (const [, gb] of groupBest) {
     if (gb.info.tier !== 1) continue;
     const candidates = [];
-    if (gb.jump) candidates.push({ type: "劇烈變動", cand: gb.jump, score: gb.jump.score });
+    if (gb.jump) candidates.push({ type: "劇烈變動", cand: gb.jump, score: jumpScore(gb.jump) });
     if (gb.newEntry) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
     if (gb.momentum) candidates.push({ type: "動能延續", cand: gb.momentum, score: momentumScore(gb.momentum) });
     candidates.sort((a, b) => b.score - a.score);
@@ -538,7 +543,7 @@ async function main() {
   for (const [, gb] of groupBest) {
     if (gb.info.tier !== 2) continue;
     const candidates = [];
-    if (gb.jump && passesMajorActGate(gb.jump)) candidates.push({ type: "劇烈變動", cand: gb.jump, score: gb.jump.score });
+    if (gb.jump && passesMajorActGate(gb.jump)) candidates.push({ type: "劇烈變動", cand: gb.jump, score: jumpScore(gb.jump) });
     if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
     if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) candidates.push({ type: "動能延續", cand: gb.momentum, score: momentumScore(gb.momentum) });
     if (!candidates.length) continue; // 這個平台這週沒有過門檻的候選，就不勉強塞訊號
@@ -551,7 +556,7 @@ async function main() {
     if (gb.info.tier !== 3) continue;
     // 劇烈變動改用「相對這個來源自己門檻的倍數」，不是原始跳動幅度，
     // 不然波動天生就小的來源（例如 Cashbox）永遠比不過波動大的來源
-    if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: gb.jump.jump / jumpFloorFor(gb.jump.chartKey) });
+    if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: jumpScore(gb.jump) });
     if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
     if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
   }
