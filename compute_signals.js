@@ -81,7 +81,7 @@ function positionWeight(finalRank, chartSize) {
 // 劇烈變動的公式，不是因為不夠格，只是公式量級不對等）。統一改成「這次表現是自己歷史門檻的幾倍」，
 // 三種類型才能公平放在一起比較、排前幾名
 function newEntryScore(cand) {
-  return cand.pct / newEntryFloorFor(cand.chartKey);
+  return cand.impliedJump / jumpFloorFor(cand.chartKey);
 }
 function momentumScore(cand) {
   return cand.climbed / momentumFloorFor(cand.chartKey);
@@ -268,29 +268,8 @@ function groupByChartAndPeriod(snapshots) {
 }
 
 // 對單一 chart_key，在最近一週的窗口內，各找出「最強的一個」候選（不是全部達標的都算）
-// 新進榜門檻：首次登場的名次百分比（1=衝進榜首）要達到這個來源歷史上的 90 百分位才算數，
-// 用 2026-09-04 分析（403,277 筆快照）的結果；90 百分位比 95 百分位溫和，避免太嚴格導致
-// 整週篩不出任何訊號；樣本數太少（<100）的不信任算出來的數字，用同類型裡樣本數足夠的當備援
-const NEW_ENTRY_FLOOR = {
-  cashbox_台語點播週榜: 0.85, // 原始 90 百分位 0.867，樣本僅 55，稍微保守
-  cashbox_國語點播週榜: 0.85, // 原始 90 百分位 0.900，樣本僅 50，稍微保守
-  kkbox_japanese: 0.900,
-  kkbox_kma: 0.972,
-  kkbox_korean: 0.900,
-  kkbox_mandarin: 0.910,
-  kkbox_taiwanese: 0.910,
-  kkbox_western: 0.910,
-  spotify_daily: 0.874,
-  spotify_weekly: 0.850,
-  streetvoice_realtime: 0.920,
-  streetvoice_weekly: 0.900, // 原始 90 百分位 0.950 仍偏嚴，放寬到跟 realtime 接近
-  youtube_top: 0.880,
-  youtube_trending: 0.867,
-};
-const DEFAULT_NEW_ENTRY_FLOOR = 0.85; // 沒對應到上面任何一種來源時的保守備援值
-function newEntryFloorFor(chartKey) {
-  return NEW_ENTRY_FLOOR[sourceTypeOf(chartKey)] ?? DEFAULT_NEW_ENTRY_FLOOR;
-}
+// 新進榜不再用自己獨立的一套百分位門檻——空降視為「從榜外(chartSize+1)跳進來」，
+// 直接套用跟劇烈變動同一套 jumpFloorFor，兩者才能用同一把尺公平比較
 
 // 動能延續門檻：連續上升區段爬升的名次數，要達到這個來源歷史上的 90 百分位才算數。
 // KKBOX 除了 kma 之外都是週榜，一個 7 天窗口湊不到連續 3 期資料，結構上不可能有動能延續，
@@ -361,15 +340,17 @@ function bestCandidatesForChart(chartKey, periodsMap) {
     if (best) result.jump = { ...best, chartSize, chartKey };
   }
 
-  // ---- 新進榜：本週窗口內首次出現、且名次最高（佔榜單百分比最深）的一首。
-  // 這裡先不套歷史門檻——Tier 1 靠這個保底，門檻改成只在組 Tier 2/3 池子時才檢查 ----
+  // ---- 新進榜：本週窗口內首次出現的歌。空降這件事本身沒有「真正的起點名次」可以量，
+  // 統一視為「從榜外(chartSize+1)跳進來」，套用跟劇烈變動完全一樣的度量方式——
+  // 這樣「空降第 3 名」跟「從 178 名跳到 46 名」才是同一把尺，能公平比較 ----
   {
-    let best = null, bestPct = 0;
+    let best = null, bestImpliedJump = -Infinity;
     for (const cur of weekEndRows) {
       if (appearedBeforeToday.has(trackKey(cur))) continue;
       if (cur.rank == null) continue;
       const pct = 1 - (cur.rank - 1) / chartSize;
-      if (pct > bestPct) { bestPct = pct; best = { cur, pct, chartSize, chartKey }; }
+      const impliedJump = (chartSize + 1) - cur.rank;
+      if (impliedJump > bestImpliedJump) { bestImpliedJump = impliedJump; best = { cur, pct, impliedJump, chartSize, chartKey }; }
     }
     if (best) result.newEntry = best;
   }
@@ -544,7 +525,7 @@ async function main() {
     if (gb.info.tier !== 2) continue;
     const candidates = [];
     if (gb.jump && passesMajorActGate(gb.jump)) candidates.push({ type: "劇烈變動", cand: gb.jump, score: jumpScore(gb.jump) });
-    if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.newEntry && gb.newEntry.impliedJump >= jumpFloorFor(gb.newEntry.chartKey)) candidates.push({ type: "新進榜", cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
     if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) candidates.push({ type: "動能延續", cand: gb.momentum, score: momentumScore(gb.momentum) });
     if (!candidates.length) continue; // 這個平台這週沒有過門檻的候選，就不勉強塞訊號
     candidates.sort((a, b) => b.score - a.score);
@@ -557,7 +538,7 @@ async function main() {
     // 劇烈變動改用「相對這個來源自己門檻的倍數」，不是原始跳動幅度，
     // 不然波動天生就小的來源（例如 Cashbox）永遠比不過波動大的來源
     if (gb.jump) tier3Pool.push({ type: "劇烈變動", info: gb.info, cand: gb.jump, score: jumpScore(gb.jump) });
-    if (gb.newEntry && gb.newEntry.pct >= newEntryFloorFor(gb.newEntry.chartKey)) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
+    if (gb.newEntry && gb.newEntry.impliedJump >= jumpFloorFor(gb.newEntry.chartKey)) tier3Pool.push({ type: "新進榜", info: gb.info, cand: gb.newEntry, score: newEntryScore(gb.newEntry) });
     if (gb.momentum && gb.momentum.climbed >= momentumFloorFor(gb.momentum.chartKey)) tier3Pool.push({ type: "動能延續", info: gb.info, cand: gb.momentum, score: momentumScore(gb.momentum) });
   }
   console.log(`Tier 3 候選池：${tier3Pool.length} 個（要 >= 10 才會開始比較離群值）`);
