@@ -3,7 +3,12 @@ name: Compute Weekly Signals
 on:
   schedule:
     - cron: "0 6 * * 5"   # 每週五 UTC 06:00 = 台北週五 14:00
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      skip_enrichment:
+        description: "跳過背景說明查詢（測試演算法邏輯時勾選，不會連帶燒 API 額度；排程自動觸發永遠不會跳過）"
+        type: boolean
+        default: false
 
 jobs:
   compute:
@@ -18,7 +23,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      - run: node enrich_signal_context.js
+      - name: 查詢背景說明（可跳過）
+        if: github.event.inputs.skip_enrichment != 'true'
+        run: node enrich_signal_context.js
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
