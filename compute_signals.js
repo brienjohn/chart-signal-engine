@@ -199,6 +199,9 @@ function linkOf(row) {
   if (src.startsWith("streetvoice")) {
     return m.song_url || null;
   }
+  if (src.startsWith("youtube")) {
+    return m.video_url || null;
+  }
   return null;
 }
 
