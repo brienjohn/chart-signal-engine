@@ -138,6 +138,41 @@ async function fetchAllSnapshots() {
   return all;
 }
 
+// 讀取「每個榜、每首歌最早出現的時間」。chart_snapshots 只保留最近 60 天之後，
+// 更早的資料會被修剪掉，但「這首歌以前出現過」這件事（新進榜的判斷依據）要保住，
+// 所以修剪前會先把每首歌最早出現的時間記進 track_first_seen，這裡讀回來補上。
+// 讀不到就直接中止：悄悄略過的話，修剪之後所有舊歌都會被誤判成「新進榜」。
+async function fetchFirstSeen() {
+  const byChart = new Map(); // chart_key -> Map(trackKey -> 最早出現的時間（毫秒）)
+  let lastId = -1;
+  const pageSize = 1000;
+  let total = 0;
+  while (true) {
+    const url = `${SUPABASE_URL}/rest/v1/track_first_seen?select=id,chart_key,artist_name,track_name,first_seen&id=gt.${lastId}&order=id.asc&limit=${pageSize}`;
+    const res = await fetchWithRetry(url, {
+      headers: { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`讀取 track_first_seen 失敗：HTTP ${res.status} ${body.slice(0, 300)}`);
+    }
+    const page = await res.json();
+    if (page.length === 0) break;
+    for (const r of page) {
+      if (!byChart.has(r.chart_key)) byChart.set(r.chart_key, new Map());
+      const m = byChart.get(r.chart_key);
+      const key = trackKey(r);
+      const ms = new Date(r.first_seen).getTime();
+      if (!m.has(key) || ms < m.get(key)) m.set(key, ms);
+    }
+    total += page.length;
+    lastId = page[page.length - 1].id;
+    if (page.length < pageSize) break;
+  }
+  console.log(`讀取 track_first_seen：${total} 筆`);
+  return byChart;
+}
+
 async function clearExistingSignals() {
   const url = `${SUPABASE_URL}/rest/v1/chart_signals?id=gte.0`; // gte.0 當條件是因為 REST 介面要求 DELETE 一定要帶篩選條件，這裡等於「全部都刪」
   const res = await fetchWithRetry(url, {
@@ -293,7 +328,7 @@ function momentumFloorFor(chartKey) {
   return MOMENTUM_FLOOR[sourceTypeOf(chartKey)] ?? DEFAULT_MOMENTUM_FLOOR;
 }
 
-function bestCandidatesForChart(chartKey, periodsMap) {
+function bestCandidatesForChart(chartKey, periodsMap, firstSeenForChart) {
   const allPeriods = [...periodsMap.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
   if (allPeriods.length < 2) return {};
 
@@ -310,6 +345,14 @@ function bestCandidatesForChart(chartKey, periodsMap) {
   for (const [t, rows] of allPeriods) {
     if (new Date(t).getTime() >= new Date(windowPeriods[0][0]).getTime()) break;
     for (const r of rows) everAppearedBeforeWindow.add(trackKey(r));
+  }
+  // 舊資料被修剪掉之後，窗口以前出現過的歌改由 track_first_seen 補上：
+  // 最早出現的時間早於窗口起點，就等於「窗口以前出現過」，跟直接翻舊資料的結果一致
+  if (firstSeenForChart) {
+    const windowStartMs = new Date(windowPeriods[0][0]).getTime();
+    for (const [key, firstMs] of firstSeenForChart) {
+      if (firstMs < windowStartMs) everAppearedBeforeWindow.add(key);
+    }
   }
 
   // 「今天以前出現過」要涵蓋窗口內的每一天（不只是窗口第一天），
@@ -459,13 +502,15 @@ async function main() {
   const snapshots = await fetchAllSnapshots();
   console.log(`共 ${snapshots.length} 筆快照`);
 
+  const firstSeenByChart = await fetchFirstSeen();
+
   const byChart = groupByChartAndPeriod(snapshots);
   console.log(`共 ${byChart.size} 個不同的榜（chart_key）`);
 
   const perChartBest = new Map();
   for (const [chartKey, periodsMap] of byChart) {
     if (chartKey.startsWith("iradio")) continue; // iRadio 另外用「本週播放次數排行」處理，不進入這套比較邏輯
-    const best = bestCandidatesForChart(chartKey, periodsMap);
+    const best = bestCandidatesForChart(chartKey, periodsMap, firstSeenByChart.get(chartKey));
     if (Object.keys(best).length) perChartBest.set(chartKey, best);
   }
   console.log(`${perChartBest.size} 個榜本週有可比較的候選訊號`);
