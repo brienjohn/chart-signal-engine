@@ -3,7 +3,12 @@ name: Ingest Chart Snapshots
 on:
   schedule:
     - cron: "0 6 * * *"   # 每天 UTC 06:00 = 台北 14:00
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      lookback_commits:
+        description: "每個來源往回看幾個有更新資料的 commit（平常留 1；排程停擺多天後要補洞時填 60）"
+        type: string
+        default: "1"
 
 jobs:
   ingest:
@@ -19,3 +24,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          INGEST_LOOKBACK_COMMITS: ${{ github.event.inputs.lookback_commits || '1' }}

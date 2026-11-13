@@ -8,6 +8,20 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 const GITHUB_OWNER = "brienjohn";
 
+// 每個來源往回看幾個「有動到該來源檔案」的 commit。預設 1 = 只取最新一批（每天排程的正常行為）。
+// 如果排程連續停擺好幾天（例如 GitHub 權杖過期），中間幾天的檔案在更早的 commit 裡，
+// 手動執行時把這個數字調大（例如 60）就能一次補回來；寫入是 upsert，重複 ingest 不會產生重複資料。
+const LOOKBACK = Math.max(1, parseInt(process.env.INGEST_LOOKBACK_COMMITS || "1", 10) || 1);
+
+// 過程中發生的所有錯誤都記在這裡。以前每個錯誤只印一行警告、最後照樣「成功」結束，
+// GitHub 的權杖過期後所有來源都被拒絕（HTTP 401），排程卻連續十天顯示綠燈、完全沒人發現；
+// 現在只要有任何一個錯誤，執行結束時會讓整個 workflow 變紅，GitHub 才會寄失敗通知信。
+const errors = [];
+function recordError(message) {
+  errors.push(message);
+  console.warn(`[warn] ${message}`);
+}
+
 function githubHeaders() {
   const headers = { Accept: "application/vnd.github+json" };
   if (GITHUB_TOKEN) headers.Authorization = `token ${GITHUB_TOKEN}`;
@@ -182,46 +196,63 @@ async function listRecentCommits(repo, pathPrefix, perPage = 15) {
   return res.json();
 }
 
+const commitFilesCache = new Map();
+
 async function getCommitFiles(repo, sha) {
+  const cacheKey = `${repo}@${sha}`;
+  if (commitFilesCache.has(cacheKey)) return commitFilesCache.get(cacheKey);
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/commits/${sha}`;
   const res = await fetch(url, { headers: githubHeaders() });
   if (!res.ok) throw new Error(`讀取 commit ${sha} 失敗：HTTP ${res.status}`);
   const data = await res.json();
-  return (data.files || [])
+  const files = (data.files || [])
     .filter((f) => f.status !== "removed")
     .map((f) => ({
       name: f.filename.split("/").pop(),
       path: f.filename,
       sha,
     }));
+  commitFilesCache.set(cacheKey, files);
+  return files;
 }
 
-// 針對某個來源的檔名前綴，在最近幾次 commit 裡找「第一次（最新一次）真的有動到符合前綴檔案」的那次，
-// 回傳那次 commit 裡符合前綴的所有檔案
+// 針對某個來源的檔名前綴，在最近幾次 commit 裡找「有動到符合前綴檔案」的 commit，
+// 取最近 LOOKBACK 個（預設 1 = 只取最新那一個），回傳這些 commit 裡符合前綴的所有檔案
 async function findLatestMatchingCommitFiles(repo, prefix, excludePrefix, commitsCache) {
   if (!commitsCache[repo]) {
-    commitsCache[repo] = await listRecentCommits(repo, "data", 15);
+    commitsCache[repo] = await listRecentCommits(repo, "data", Math.min(100, Math.max(15, LOOKBACK * 2)));
   }
   const commits = commitsCache[repo];
+
+  const collected = [];
+  const seen = new Set();
+  let matchedCommits = 0;
 
   for (const c of commits) {
     let files;
     try {
       files = await getCommitFiles(repo, c.sha);
     } catch (e) {
-      console.warn(`[warn] 讀取 ${repo}@${c.sha.slice(0, 7)} 檔案清單失敗：${e.message}`);
+      recordError(`讀取 ${repo}@${c.sha.slice(0, 7)} 檔案清單失敗：${e.message}`);
       continue;
     }
     let matched = files.filter((f) => f.path.startsWith(prefix));
     if (excludePrefix) matched = matched.filter((f) => !f.path.startsWith(excludePrefix));
-    if (matched.length) {
-      return matched.map((f) => ({
+    if (!matched.length) continue;
+
+    for (const f of matched) {
+      const key = `${f.path}@${f.sha}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      collected.push({
         name: f.name,
         download_url: `https://raw.githubusercontent.com/${GITHUB_OWNER}/${repo}/${f.sha}/${f.path}`,
-      }));
+      });
     }
+    matchedCommits++;
+    if (matchedCommits >= LOOKBACK) break;
   }
-  return [];
+  return collected;
 }
 
 function parseCsv(text) {
@@ -326,7 +357,7 @@ async function ingestIradio() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     listing = await res.json();
   } catch (e) {
-    console.warn(`[warn] ${source} 列出檔案失敗：${e.message}`);
+    recordError(`${source} 列出檔案失敗：${e.message}`);
     return 0;
   }
 
@@ -344,7 +375,7 @@ async function ingestIradio() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       allRows.push(...parseCsv(await res.text()));
     } catch (e) {
-      console.warn(`[warn] ${source} 讀取 ${f.name} 失敗：${e.message}`);
+      recordError(`${source} 讀取 ${f.name} 失敗：${e.message}`);
     }
   }
 
@@ -379,7 +410,7 @@ async function ingestIradio() {
       await insertSnapshots(batch);
       inserted += batch.length;
     } catch (e) {
-      console.warn(`[warn] ${source} 寫入 Supabase 失敗（第 ${i}-${i + batch.length} 筆）：${e.message}`);
+      recordError(`${source} 寫入 Supabase 失敗（第 ${i}-${i + batch.length} 筆）：${e.message}`);
     }
   }
   console.log(`[${source}] ${dated.length} 個檔案，聚合成 ${rows.length} 筆（每首歌每天一筆）-> 寫入 ${inserted} 筆`);
@@ -402,7 +433,7 @@ async function main() {
     try {
       files = await findLatestMatchingCommitFiles(src.repo, src.prefix, src.excludePrefix, commitsCache);
     } catch (e) {
-      console.warn(`[warn] ${src.source} 找檔案失敗：${e.message}`);
+      recordError(`${src.source} 找檔案失敗：${e.message}`);
       files = [];
     }
     if (!files.length) {
@@ -423,7 +454,7 @@ async function main() {
           sourceRows.push({ source: src.source, ...mapped });
         });
       } catch (e) {
-        console.warn(`[warn] ${src.source} 讀取 ${f.name} 失敗：${e.message}`);
+        recordError(`${src.source} 讀取 ${f.name} 失敗：${e.message}`);
       }
     }
 
@@ -448,7 +479,7 @@ async function main() {
         await insertSnapshots(batch);
         totalInserted += batch.length;
       } catch (e) {
-        console.warn(`[warn] ${src.source} 寫入 Supabase 失敗（第 ${i}-${i + batch.length} 筆）：${e.message}`);
+        recordError(`${src.source} 寫入 Supabase 失敗（第 ${i}-${i + batch.length} 筆）：${e.message}`);
       }
     }
 
@@ -459,6 +490,13 @@ async function main() {
 
   const iradioInserted = await ingestIradio();
   console.log(`（其中電台 iRadio：${iradioInserted} 筆）`);
+
+  if (errors.length) {
+    console.error(`\n[失敗] 這次執行過程中出現 ${errors.length} 個錯誤，資料可能沒有完整寫入：`);
+    errors.forEach((m) => console.error(`  - ${m}`));
+    console.error("（如果全部是 HTTP 401，通常是 GitHub 權杖（secret：GH_TOKEN）過期或被撤銷，需要重新產生並更新。）");
+    process.exitCode = 1;
+  }
 }
 
 main().catch((e) => {
