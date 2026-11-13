@@ -458,6 +458,18 @@ async function main() {
       }
     }
 
+    // 日期或名次缺失的列沒辦法寫進資料庫（這兩欄是 NOT NULL），而且同一批 500 筆裡只要混進一列，
+    // 整批好資料都會被連帶拒絕寫入（Spotify 週榜 2026-08-05 那份來源檔案整份日期、藝人名稱都是空的，就曾經這樣拖累過）。
+    // 先把這種列挑出來略過、單獨回報：平常每天的排程只讀最新檔案，出現壞列代表今天的資料真的有問題，要讓 workflow 變紅；
+    // 手動補洞（往回看多個 commit）時難免讀到歷史上本來就壞掉的舊檔，只提醒、不算失敗。
+    const unusable = sourceRows.filter((r) => !r.captured_at || r.rank == null);
+    if (unusable.length) {
+      const msg = `${src.source}：${unusable.length} 列沒有可用的日期或名次（通常是來源檔案本身內容壞掉），已略過這些列`;
+      if (LOOKBACK > 1) console.warn(`[注意] ${msg}`);
+      else recordError(msg);
+      sourceRows = sourceRows.filter((r) => r.captured_at && r.rank != null);
+    }
+
     // 送進 Supabase 前先去重：同一批裡如果有兩筆自然鍵完全一樣的資料，
     // Postgres 的 upsert 沒辦法在同一個指令裡對同一列更新兩次，會整批失敗
     const dedupMap = new Map();
