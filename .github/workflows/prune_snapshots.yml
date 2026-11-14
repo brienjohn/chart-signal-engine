@@ -1,0 +1,26 @@
+name: Prune Chart Snapshots
+
+on:
+  schedule:
+    # 每週日 UTC 03:17 = 台北週日 11:17，避開每日匯入（台北 14:00）與每週算訊號（台北週五 14:00）
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      retain_days:
+        description: "保留最近幾天的資料（平常留 60；最少 14）"
+        type: string
+        default: "60"
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node prune_snapshots.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PRUNE_RETAIN_DAYS: ${{ github.event.inputs.retain_days || '60' }}

@@ -1,5 +1,7 @@
 // 資料新鮮度巡邏：每天固定檢查一次每個榜（依 chart_key 前綴分類）最新一筆是哪天，
 // 跟這個榜「該多久更新一次」的預期值比對，太久沒更新就在 GitHub 開 issue 通知。
+// 同時檢查資料庫大小：超過 DB_SIZE_LIMIT_MB（400 MB）就另外開一個 issue 通知
+// （Supabase 免費方案上限 500 MB，留 100 MB 緩衝）。
 //
 // 設計原則：
 // - 檢查的是 chart_snapshots（原始爬蟲資料），不是 chart_signals（每週才算一次的訊號結果）——
@@ -10,6 +12,8 @@
 //   逐一查、每次只要資料庫吐一筆就好，負擔小很多。
 // - 同一批持續發生的問題只會維護同一個 issue（用固定標題比對），用留言累加，
 //   不會每天開一個新 issue 洗版；問題消失後自動把 issue 關閉。
+//   新鮮度與資料庫大小是兩個不同標題的 issue，各自開關，互不影響。
+// - 資料庫大小用資料庫函式 get_database_size() 查（只有 service_role 能呼叫）。
 // - 這支只負責偵測、通知，不做任何自動修正——不同來源斷掉的原因差異很大
 //   （程式邏輯、網站改版、本機權限……），需要人工或另外開對話個別排查。
 //
@@ -21,6 +25,9 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPOSITORY; // GitHub Actions 會自動帶入，格式 "owner/repo"
 const ISSUE_TITLE = "⚠️ 資料抓取新鮮度異常";
 const ISSUE_LABEL = "data-freshness";
+const DB_ISSUE_TITLE = "⚠️ 資料庫容量接近上限";
+const DB_SIZE_LIMIT_MB = 400;
+const DB_PLAN_LIMIT_MB = 500;
 
 // 每個要巡邏的來源：prefix 用來比對 chart_key 開頭（涵蓋該來源底下所有市場／類型），
 // days 是「超過幾天沒更新算異常」的門檻，label 是顯示用的名稱。
@@ -52,6 +59,23 @@ async function fetchLatest(prefix) {
   if (!res.ok) throw new Error(`查詢 ${prefix} 失敗：HTTP ${res.status} ${await res.text()}`);
   const rows = await res.json();
   return rows.length ? rows[0].captured_at : null;
+}
+
+// 查整個資料庫目前的大小（MB）
+async function fetchDbSizeMb() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_database_size`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(`查詢資料庫大小失敗：HTTP ${res.status} ${await res.text()}`);
+  const bytes = await res.json();
+  if (typeof bytes !== "number") throw new Error(`get_database_size 回傳了非預期的內容：${JSON.stringify(bytes)}`);
+  return bytes / 1024 / 1024;
 }
 
 async function checkAll() {
@@ -87,6 +111,21 @@ function formatIssueBody(problems, checkedAt) {
   return lines.join("\n");
 }
 
+function formatDbIssueBody(sizeMb, checkedAt) {
+  const lines = [
+    `巡邏時間：${checkedAt}（台北時間）`,
+    "",
+    `資料庫目前 **${sizeMb.toFixed(1)} MB**，超過警戒線 ${DB_SIZE_LIMIT_MB} MB（Supabase 免費方案上限 ${DB_PLAN_LIMIT_MB} MB）。`,
+    "",
+    "可以先檢查：",
+    "- Actions 裡的「Prune Chart Snapshots」最近有沒有成功跑完（每週日自動修剪 60 天以前的資料）。",
+    "- 如果修剪正常但還是太大，代表每天進來的資料變多了，需要縮短保留天數或另外瘦身。",
+    "",
+    "這個 issue 是自動巡邏產生的，只負責偵測，不會自動修正。之後每次巡邏如果還超過，會在下面留言更新；降回警戒線以下後會自動關閉。",
+  ];
+  return lines.join("\n");
+}
+
 async function ghApi(path, options = {}) {
   const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}${path}`, {
     ...options,
@@ -101,9 +140,64 @@ async function ghApi(path, options = {}) {
   return res.status === 204 ? null : res.json();
 }
 
-async function findOpenIssue() {
-  const issues = await ghApi(`/issues?state=open&labels=${encodeURIComponent(ISSUE_LABEL)}&per_page=10`);
-  return issues.find((i) => i.title === ISSUE_TITLE) || null;
+async function findOpenIssue(title) {
+  const issues = await ghApi(`/issues?state=open&labels=${encodeURIComponent(ISSUE_LABEL)}&per_page=30`);
+  return issues.find((i) => i.title === title) || null;
+}
+
+async function closeIssue(issue, message) {
+  await ghApi(`/issues/${issue.number}/comments`, { method: "POST", body: JSON.stringify({ body: message }) });
+  await ghApi(`/issues/${issue.number}`, { method: "PATCH", body: JSON.stringify({ state: "closed" }) });
+  console.log(`[OK] 已關閉先前的 issue #${issue.number}`);
+}
+
+async function openOrUpdateIssue(existingIssue, title, body) {
+  if (existingIssue) {
+    await ghApi(`/issues/${existingIssue.number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
+    console.log(`[OK] 已更新既有 issue #${existingIssue.number}`);
+  } else {
+    const created = await ghApi(`/issues`, {
+      method: "POST",
+      body: JSON.stringify({ title, body, labels: [ISSUE_LABEL] }),
+    });
+    console.log(`[OK] 已建立新 issue #${created.number}`);
+  }
+}
+
+async function handleFreshness(checkedAt) {
+  const problems = await checkAll();
+  const existingIssue = await findOpenIssue(ISSUE_TITLE);
+
+  if (!problems.length) {
+    console.log("[OK] 所有來源都在正常更新範圍內。");
+    if (existingIssue) {
+      await closeIssue(existingIssue, `巡邏時間：${checkedAt}（台北時間）\n\n所有來源都恢復正常更新了，關閉這個 issue。`);
+    }
+    return;
+  }
+
+  console.log(`[異常] 發現 ${problems.length} 個來源超過更新門檻：`);
+  problems.forEach((p) => console.log(`  - ${p.label}：最新 ${p.latest || "無"}`));
+  await openOrUpdateIssue(existingIssue, ISSUE_TITLE, formatIssueBody(problems, checkedAt));
+}
+
+async function handleDbSize(checkedAt) {
+  const sizeMb = await fetchDbSizeMb();
+  const existingIssue = await findOpenIssue(DB_ISSUE_TITLE);
+
+  if (sizeMb <= DB_SIZE_LIMIT_MB) {
+    console.log(`[OK] 資料庫大小 ${sizeMb.toFixed(1)} MB，在警戒線 ${DB_SIZE_LIMIT_MB} MB 以內。`);
+    if (existingIssue) {
+      await closeIssue(
+        existingIssue,
+        `巡邏時間：${checkedAt}（台北時間）\n\n資料庫降到 ${sizeMb.toFixed(1)} MB，回到警戒線 ${DB_SIZE_LIMIT_MB} MB 以內，關閉這個 issue。`
+      );
+    }
+    return;
+  }
+
+  console.log(`[異常] 資料庫大小 ${sizeMb.toFixed(1)} MB，超過警戒線 ${DB_SIZE_LIMIT_MB} MB。`);
+  await openOrUpdateIssue(existingIssue, DB_ISSUE_TITLE, formatDbIssueBody(sizeMb, checkedAt));
 }
 
 async function main() {
@@ -112,37 +206,18 @@ async function main() {
   }
 
   const checkedAt = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
-  const problems = await checkAll();
-  const existingIssue = await findOpenIssue();
 
-  if (!problems.length) {
-    console.log("[OK] 所有來源都在正常更新範圍內。");
-    if (existingIssue) {
-      await ghApi(`/issues/${existingIssue.number}/comments`, {
-        method: "POST",
-        body: JSON.stringify({ body: `巡邏時間：${checkedAt}（台北時間）\n\n所有來源都恢復正常更新了，關閉這個 issue。` }),
-      });
-      await ghApi(`/issues/${existingIssue.number}`, { method: "PATCH", body: JSON.stringify({ state: "closed" }) });
-      console.log(`[OK] 已關閉先前的 issue #${existingIssue.number}`);
+  // 兩項檢查各自執行：其中一項出錯，另一項照樣跑完，最後再讓 workflow 變紅
+  const errors = [];
+  for (const [name, fn] of [["新鮮度檢查", handleFreshness], ["資料庫大小檢查", handleDbSize]]) {
+    try {
+      await fn(checkedAt);
+    } catch (e) {
+      console.error(`[錯誤] ${name}失敗：`, e);
+      errors.push(e);
     }
-    return;
   }
-
-  console.log(`[異常] 發現 ${problems.length} 個來源超過更新門檻：`);
-  problems.forEach((p) => console.log(`  - ${p.label}：最新 ${p.latest || "無"}`));
-
-  const body = formatIssueBody(problems, checkedAt);
-
-  if (existingIssue) {
-    await ghApi(`/issues/${existingIssue.number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
-    console.log(`[OK] 已更新既有 issue #${existingIssue.number}`);
-  } else {
-    const created = await ghApi(`/issues`, {
-      method: "POST",
-      body: JSON.stringify({ title: ISSUE_TITLE, body, labels: [ISSUE_LABEL] }),
-    });
-    console.log(`[OK] 已建立新 issue #${created.number}`);
-  }
+  if (errors.length) process.exit(1);
 }
 
 main().catch((e) => {
